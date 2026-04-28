@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -8,7 +9,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -85,38 +88,130 @@ func handleTransform(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sourceType := excel.SourceType(r.FormValue("sourceType"))
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	files := uploadedFiles(r)
+	if len(files) == 0 {
 		http.Error(w, "missing file", http.StatusBadRequest)
 		return
 	}
+
+	if len(files) == 1 {
+		result, err := transformUploadedFile(files[0], sourceType)
+		if err != nil {
+			writeTransformError(w, err)
+			return
+		}
+
+		logPath, err := writeTransformLog(files[0].Filename, sourceType, result.LogMarkdown)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("write transform log: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		filename := outputWorkbookFilename(files[0].Filename)
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		w.Header().Set("Content-Disposition", contentDisposition(filename))
+		w.Header().Set("X-Transform-Log-Path", logPath)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(result.Workbook.Bytes())
+		return
+	}
+
+	zipData, err := transformUploadedFilesToZip(files, sourceType)
+	if err != nil {
+		writeTransformError(w, err)
+		return
+	}
+
+	filename := fmt.Sprintf("处理后文件-%s.zip", time.Now().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition(filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(zipData.Bytes())
+}
+
+func contentDisposition(filename string) string {
+	encoded := url.PathEscape(filename)
+	return fmt.Sprintf(`attachment; filename="download%s"; filename*=UTF-8''%s`, filepath.Ext(filename), encoded)
+}
+
+func uploadedFiles(r *http.Request) []*multipart.FileHeader {
+	if r.MultipartForm == nil {
+		return nil
+	}
+	if files := r.MultipartForm.File["files"]; len(files) > 0 {
+		return files
+	}
+	return r.MultipartForm.File["file"]
+}
+
+func transformUploadedFile(header *multipart.FileHeader, sourceType excel.SourceType) (*excel.Result, error) {
+	file, err := header.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open uploaded file %s: %w", header.Filename, err)
+	}
 	defer file.Close()
 
-	result, err := excel.Transform(file, sourceType, bytes.NewReader(hardwareProductMapping))
-	if err != nil {
-		switch {
-		case errors.Is(err, excel.ErrUnsupportedSourceType):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		case errors.Is(err, excel.ErrMappingsNotImplemented):
-			http.Error(w, err.Error(), http.StatusNotImplemented)
-		default:
-			http.Error(w, fmt.Sprintf("transform workbook: %v", err), http.StatusUnprocessableEntity)
+	return excel.Transform(file, sourceType, bytes.NewReader(hardwareProductMapping))
+}
+
+func transformUploadedFilesToZip(files []*multipart.FileHeader, sourceType excel.SourceType) (*bytes.Buffer, error) {
+	output := &bytes.Buffer{}
+	archive := zip.NewWriter(output)
+
+	usedNames := make(map[string]int, len(files))
+	for _, file := range files {
+		result, err := transformUploadedFile(file, sourceType)
+		if err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("%s: %w", file.Filename, err)
 		}
-		return
+
+		filename := uniqueZipFilename(outputWorkbookFilename(file.Filename), usedNames)
+		writer, err := archive.Create(filename)
+		if err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("create zip entry %s: %w", filename, err)
+		}
+		if _, err := writer.Write(result.Workbook.Bytes()); err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("write zip entry %s: %w", filename, err)
+		}
 	}
 
-	logPath, err := writeTransformLog(header.Filename, sourceType, result.LogMarkdown)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("write transform log: %v", err), http.StatusInternalServerError)
-		return
+	if err := archive.Close(); err != nil {
+		return nil, fmt.Errorf("close zip: %w", err)
 	}
+	return output, nil
+}
 
-	filename := "处理后" + strings.TrimSuffix(header.Filename, path.Ext(header.Filename)) + ".xlsx"
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	w.Header().Set("X-Transform-Log-Path", logPath)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(result.Workbook.Bytes())
+func writeTransformError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, excel.ErrUnsupportedSourceType):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, excel.ErrMappingsNotImplemented):
+		http.Error(w, err.Error(), http.StatusNotImplemented)
+	default:
+		http.Error(w, fmt.Sprintf("transform workbook: %v", err), http.StatusUnprocessableEntity)
+	}
+}
+
+func outputWorkbookFilename(sourceFilename string) string {
+	base := strings.TrimSuffix(filepath.Base(sourceFilename), filepath.Ext(sourceFilename))
+	if base == "." || base == "" {
+		base = "workbook"
+	}
+	return "处理后_" + safeLogFilename(base) + ".xlsx"
+}
+
+func uniqueZipFilename(filename string, used map[string]int) string {
+	count := used[filename]
+	used[filename] = count + 1
+	if count == 0 {
+		return filename
+	}
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	return fmt.Sprintf("%s-%d%s", base, count+1, ext)
 }
 
 func writeTransformLog(sourceFilename string, sourceType excel.SourceType, content string) (string, error) {

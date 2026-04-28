@@ -4,9 +4,10 @@ import { ElMessage } from 'element-plus'
 import { DocumentChecked, Download, InfoFilled, UploadFilled } from '@element-plus/icons-vue'
 
 const sourceType = ref('outbound')
-const selectedFile = ref(null)
+const selectedFiles = ref([])
 const uploading = ref(false)
 const resultLogPath = ref('')
+const uploadRef = ref(null)
 
 const sourceOptions = [
   {
@@ -24,31 +25,43 @@ const sourceOptions = [
 ]
 
 const currentSource = computed(() => sourceOptions.find((item) => item.value === sourceType.value))
-const selectedFileName = computed(() => selectedFile.value?.name || '尚未选择文件')
+const selectedFileName = computed(() => {
+  if (selectedFiles.value.length === 0) return '尚未选择文件'
+  if (selectedFiles.value.length === 1) return selectedFiles.value[0].name
+  return `已选择 ${selectedFiles.value.length} 个文件，将打包下载 zip`
+})
 
-function handleFileChange(uploadFile) {
-  selectedFile.value = uploadFile.raw || null
+function handleFileChange(_uploadFile, uploadFiles) {
+  selectedFiles.value = uploadFiles.map((item) => item.raw).filter(Boolean)
   resultLogPath.value = ''
 }
 
-function handleFileRemove() {
-  selectedFile.value = null
+function handleFileRemove(_uploadFile, uploadFiles) {
+  selectedFiles.value = uploadFiles.map((item) => item.raw).filter(Boolean)
   resultLogPath.value = ''
 }
 
-function handleFileExceed() {
-  ElMessage.warning('一次只能处理一个文件，请先移除已选择的文件')
+function downloadFilename(response) {
+  const disposition = response.headers.get('Content-Disposition') || ''
+  const encodedMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encodedMatch?.[1]) return decodeURIComponent(encodedMatch[1])
+  const match = disposition.match(/filename="?([^";]+)"?/i)
+  if (match?.[1]) return match[1]
+  if (selectedFiles.value.length > 1) return '处理后文件.zip'
+  return `处理后_${selectedFiles.value[0].name.replace(/\.[^.]+$/, '')}.xlsx`
 }
 
 async function transformFile() {
-  if (!selectedFile.value) {
+  if (selectedFiles.value.length === 0) {
     ElMessage.warning('请先选择 Excel 文件')
     return
   }
 
   const formData = new FormData()
   formData.append('sourceType', sourceType.value)
-  formData.append('file', selectedFile.value)
+  selectedFiles.value.forEach((file) => {
+    formData.append('files', file)
+  })
 
   uploading.value = true
   try {
@@ -65,10 +78,12 @@ async function transformFile() {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `处理后-${selectedFile.value.name}`
+    link.download = downloadFilename(response)
     link.click()
     URL.revokeObjectURL(url)
-    ElMessage.success('转换完成')
+    ElMessage.success(selectedFiles.value.length > 1 ? '批量转换完成，已下载 zip' : '转换完成')
+    selectedFiles.value = []
+    uploadRef.value?.clearFiles()
   } catch (error) {
     ElMessage.error(error.message || '转换失败')
   } finally {
@@ -106,7 +121,7 @@ async function transformFile() {
           <div class="feature-item">
             <span>03</span>
             <strong>下载结果</strong>
-            <p>自动生成标准格式和本地转换日志。</p>
+            <p>单文件直接下载，多文件自动打包 zip。</p>
           </div>
         </div>
       </aside>
@@ -122,7 +137,7 @@ async function transformFile() {
 
         <el-alert class="tip-alert" type="info" :closable="false" show-icon>
           <template #title>
-            请选择和上传文件匹配的表格类型。
+            单文件会直接下载 xlsx；多个文件会统一转换并打包 zip 下载。
           </template>
         </el-alert>
 
@@ -139,14 +154,14 @@ async function transformFile() {
           </el-form-item>
 
           <el-form-item label="Excel 文件">
-            <el-upload class="upload-box" drag :accept="currentSource.accept" :auto-upload="false" :limit="1"
-              :on-change="handleFileChange" :on-remove="handleFileRemove" :on-exceed="handleFileExceed">
+            <el-upload ref="uploadRef" class="upload-box" drag multiple :accept="currentSource.accept"
+              :auto-upload="false" :on-change="handleFileChange" :on-remove="handleFileRemove">
               <el-icon class="upload-icon">
                 <UploadFilled />
               </el-icon>
               <div class="upload-text">
                 <strong>拖拽文件到这里，或点击选择</strong>
-                <span>{{ currentSource.title }}支持：{{ currentSource.accept }}</span>
+                <span>{{ currentSource.title }}支持：{{ currentSource.accept }}，可多选批量转换</span>
               </div>
             </el-upload>
           </el-form-item>
