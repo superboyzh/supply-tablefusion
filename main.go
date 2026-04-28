@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -20,6 +22,9 @@ import (
 
 //go:embed web/dist
 var staticFiles embed.FS
+
+//go:embed 示例文件/硬件产品信息.xlsx
+var hardwareProductMapping []byte
 
 const maxUploadSize = 32 << 20
 
@@ -87,7 +92,7 @@ func handleTransform(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	output, err := excel.Transform(file, sourceType)
+	result, err := excel.Transform(file, sourceType, bytes.NewReader(hardwareProductMapping))
 	if err != nil {
 		switch {
 		case errors.Is(err, excel.ErrUnsupportedSourceType):
@@ -100,11 +105,56 @@ func handleTransform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logPath, err := writeTransformLog(header.Filename, sourceType, result.LogMarkdown)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("write transform log: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	filename := "standard-" + strings.TrimSuffix(header.Filename, path.Ext(header.Filename)) + ".xlsx"
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("X-Transform-Log-Path", logPath)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(output.Bytes())
+	_, _ = w.Write(result.Workbook.Bytes())
+}
+
+func writeTransformLog(sourceFilename string, sourceType excel.SourceType, content string) (string, error) {
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		return "", err
+	}
+
+	baseName := strings.TrimSuffix(filepath.Base(sourceFilename), filepath.Ext(sourceFilename))
+	if baseName == "." || baseName == "" {
+		baseName = "workbook"
+	}
+	baseName = safeLogFilename(baseName)
+
+	filename := fmt.Sprintf("%s-%s-%s.md", time.Now().Format("20060102-150405"), sourceType, baseName)
+	logPath := filepath.Join("logs", filename)
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return logPath, nil
+}
+
+func safeLogFilename(value string) string {
+	var builder strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_' || r == '.' || r >= 0x4e00 && r <= 0x9fff:
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func spaHandler(dist fs.FS) http.Handler {
