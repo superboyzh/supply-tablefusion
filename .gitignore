@@ -1,0 +1,6 @@
+app
+app.exe
+web/dist/
+web/node_modules/
+.DS_Store
+.idea/

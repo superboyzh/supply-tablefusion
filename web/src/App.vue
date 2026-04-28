@@ -6,9 +6,12 @@ const sourceType = ref('outbound')
 const selectedFile = ref(null)
 const uploading = ref(false)
 
-function beforeUpload(file) {
-  selectedFile.value = file
-  return false
+function handleFileChange(uploadFile) {
+  selectedFile.value = uploadFile.raw || null
+}
+
+function handleFileRemove() {
+  selectedFile.value = null
 }
 
 async function transformFile() {
@@ -71,7 +74,8 @@ async function transformFile() {
             accept=".xlsx,.xls"
             :auto-upload="false"
             :limit="1"
-            :before-upload="beforeUpload"
+            :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
           >
             <div class="upload-text">
               <strong>拖拽文件到这里</strong>
