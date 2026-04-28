@@ -4,7 +4,7 @@ set -e
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$DIR"
 
-PORT=${PORT:-8080}
+PORT=${PORT:-18080}
 
 if [ -x "./app" ]; then
   APP="./app"

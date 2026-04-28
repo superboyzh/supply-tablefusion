@@ -6,3 +6,4 @@ logs/
 .DS_Store
 .idea/
 示例文件
+output/

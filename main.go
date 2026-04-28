@@ -34,7 +34,7 @@ const maxUploadSize = 32 << 20
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "18080"
 	}
 
 	mux, err := newMux()

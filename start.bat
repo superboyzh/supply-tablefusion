@@ -1,5 +1,5 @@
 @echo off
-set PORT=8080
+set PORT=18080
 
 if exist app.exe (
   app.exe
