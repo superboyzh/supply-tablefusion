@@ -50,6 +50,23 @@ type outboundRecord struct {
 	OutputRow     int
 }
 
+type weidianRecord struct {
+	Customer      string
+	Applicant     string
+	RequestTime   time.Time
+	RecipientInfo string
+	PartCounts    map[string]float64
+	PartEntries   []partLogEntry
+	Shipping      string
+	Invoice       string
+	Notes         []string
+	SourceRow     int
+	SheetName     string
+	OutputRow     int
+	OrderNo       string
+	OrderStatus   string
+}
+
 type sourceRow struct {
 	values []string
 }
@@ -71,6 +88,50 @@ type productMappingResult struct {
 	Mapping map[string]string
 	Rows    int
 }
+
+type partDefinition struct {
+	Name string
+	ID   string
+	Col  int
+}
+
+type partLogEntry struct {
+	ProductID   string
+	ProductName string
+	Quantity    float64
+	PartName    string
+	OutputCol   int
+	OutputCell  string
+	Status      string
+	Description string
+}
+
+var weidianParts = []partDefinition{
+	{Name: "墨盒", ID: "4722165469", Col: 5},
+	{Name: "墨盒海绵", ID: "7316226980", Col: 6},
+	{Name: "章环", ID: "4466273920", Col: 7},
+	{Name: "智能印章垫", ID: "", Col: 8},
+	{Name: "工作台垫", ID: "4295433136", Col: 9},
+	{Name: "手动版墨盒", ID: "6110548102", Col: 10},
+	{Name: "智能章底盖", ID: "4294793637", Col: 11},
+	{Name: "光敏底座", ID: "46677368385", Col: 12},
+	{Name: "铜章底座", ID: "", Col: 13},
+	{Name: "垫片", ID: "4295441048", Col: 14},
+	{Name: "3M胶", ID: "4295371280", Col: 15},
+	{Name: "环形胶", ID: "4339144891", Col: 16},
+	{Name: "定制章环", ID: "6121614436", Col: 17},
+	{Name: "铜章印油", ID: "4294795757", Col: 18},
+	{Name: "光敏印油", ID: "4402625197", Col: 19},
+	{Name: "木工胶", ID: "4294767099", Col: 20},
+	{Name: "印章包", ID: "", Col: 21},
+}
+
+var weidianPartAliases = map[string]string{
+	"7255807856": "墨盒",
+	"4880927524": "墨盒海绵",
+}
+
+var weidianPartByID = buildWeidianPartByID()
 
 var outputProducts = []string{
 	"用印工作台SS1(标准版)",
@@ -127,13 +188,30 @@ func Transform(input io.Reader, sourceType SourceType, mappingInput io.Reader) (
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedSourceType, sourceType)
 	}
 
-	if sourceType != SourceTypeOutbound {
-		return nil, ErrMappingsNotImplemented
-	}
-
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
 		return nil, fmt.Errorf("read workbook: %w", err)
+	}
+
+	if sourceType == SourceTypeWeidian {
+		records, err := parseWeidianWorkbook(inputBytes)
+		if err != nil {
+			return nil, err
+		}
+		sortWeidianRecords(records)
+		assignWeidianOutputPositions(records)
+		workbook, err := buildWeidianWorkbook(records)
+		if err != nil {
+			return nil, err
+		}
+		return &Result{
+			Workbook:    workbook,
+			LogMarkdown: buildWeidianLog(records),
+		}, nil
+	}
+
+	if sourceType != SourceTypeOutbound {
+		return nil, ErrMappingsNotImplemented
 	}
 
 	productMapping, err := readProductMapping(mappingInput)
@@ -351,6 +429,371 @@ func readXLSXRows(input []byte) ([]sourceRow, error) {
 		rows = append(rows, sourceRow{values: cells})
 	}
 	return rows, nil
+}
+
+func parseWeidianWorkbook(input []byte) ([]weidianRecord, error) {
+	rows, err := readXLSXRows(input)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) < 2 {
+		return nil, fmt.Errorf("%w: weidian workbook has no data", ErrInvalidWorkbook)
+	}
+
+	headers := indexHeaders(rows[0].values)
+	requiredHeaders := []string{
+		"订单编号", "订单状态", "下单时间", "商品名称", "商品件数", "商品ID",
+		"发货状态", "收货人/提货人姓名", "收货人/提货人手机号", "收货/提货详细地址",
+	}
+	for _, name := range requiredHeaders {
+		if _, ok := headers[name]; !ok {
+			return nil, fmt.Errorf("%w: weidian workbook missing %s header", ErrInvalidWorkbook, name)
+		}
+	}
+
+	records := make([]weidianRecord, 0, len(rows)-1)
+	for rowIndex, row := range rows[1:] {
+		orderNo := row.get(headers["订单编号"])
+		if orderNo == "" {
+			continue
+		}
+		orderStatus := row.get(headers["订单状态"])
+		if orderStatus == "已关闭" {
+			continue
+		}
+
+		partCounts, partEntries, unmappedNames := parseWeidianParts(
+			row.get(headers["商品ID"]),
+			row.get(headers["商品件数"]),
+			row.get(headers["商品名称"]),
+		)
+		notes := make([]string, 0)
+		notes = append(notes, unmappedNames...)
+		for _, name := range []string{"买家留言", "卖家备注"} {
+			if col, ok := headers[name]; ok {
+				if value := row.get(col); value != "" {
+					notes = append(notes, value)
+				}
+			}
+		}
+
+		record := weidianRecord{
+			Customer:      "微店",
+			Applicant:     row.get(headers["收货人/提货人姓名"]),
+			RequestTime:   parseDateOnly(row.get(headers["下单时间"])),
+			RecipientInfo: buildRecipientInfo(row.get(headers["收货人/提货人手机号"]), row.get(headers["收货/提货详细地址"])),
+			PartCounts:    partCounts,
+			PartEntries:   partEntries,
+			Shipping:      "",
+			Invoice:       invoiceFlag(row, headers),
+			Notes:         uniqueNonEmpty(notes),
+			SourceRow:     rowIndex + 2,
+			OrderNo:       orderNo,
+			OrderStatus:   orderStatus,
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func parseWeidianParts(productIDs string, quantities string, productNames string) (map[string]float64, []partLogEntry, []string) {
+	ids := splitSemicolon(productIDs)
+	countValues := splitSemicolon(quantities)
+	names := splitSemicolon(productNames)
+	counts := make(map[string]float64)
+	entries := make([]partLogEntry, 0, len(ids))
+	unmappedNames := make([]string, 0)
+
+	for i, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		quantity := parseQuantityAt(countValues, i)
+		productName := valueAt(names, i)
+		entry := partLogEntry{
+			ProductID:   id,
+			ProductName: productName,
+			Quantity:    quantity,
+		}
+
+		part, ok := weidianPartByID[id]
+		if !ok {
+			entry.Status = "未映射"
+			entry.Description = "商品ID未配置到配件列，已放入备注供后续补充"
+			if productName != "" {
+				unmappedNames = append(unmappedNames, productName)
+			}
+			entries = append(entries, entry)
+			continue
+		}
+
+		entry.PartName = part.Name
+		entry.OutputCol = part.Col
+		entry.Status = "写入"
+		entry.Description = "已按商品ID汇总到配件列"
+		counts[part.Name] += quantity
+		entries = append(entries, entry)
+	}
+
+	return counts, entries, unmappedNames
+}
+
+func buildWeidianPartByID() map[string]partDefinition {
+	parts := make(map[string]partDefinition)
+	for _, part := range weidianParts {
+		if part.ID != "" {
+			parts[part.ID] = part
+		}
+	}
+	partsByName := make(map[string]partDefinition, len(weidianParts))
+	for _, part := range weidianParts {
+		partsByName[part.Name] = part
+	}
+	for id, partName := range weidianPartAliases {
+		part, ok := partsByName[partName]
+		if ok {
+			parts[id] = part
+		}
+	}
+	return parts
+}
+
+func assignWeidianOutputPositions(records []weidianRecord) {
+	sheetName := latestWeidianSheetName(records)
+	for i := range records {
+		nextRow := i + 4
+		records[i].SheetName = sheetName
+		records[i].OutputRow = nextRow
+		for partIndex := range records[i].PartEntries {
+			outputCol := records[i].PartEntries[partIndex].OutputCol
+			if outputCol == 0 {
+				continue
+			}
+			records[i].PartEntries[partIndex].OutputCell = fmt.Sprintf("%s%d", columnName(outputCol), nextRow)
+		}
+	}
+}
+
+func sortWeidianRecords(records []weidianRecord) {
+	sort.SliceStable(records, func(i, j int) bool {
+		left := records[i].RequestTime
+		right := records[j].RequestTime
+		if left.Equal(right) {
+			return records[i].SourceRow < records[j].SourceRow
+		}
+		if left.IsZero() {
+			return false
+		}
+		if right.IsZero() {
+			return true
+		}
+		return left.Before(right)
+	})
+}
+
+func latestWeidianSheetName(records []weidianRecord) string {
+	var latest time.Time
+	for _, record := range records {
+		if record.RequestTime.After(latest) {
+			latest = record.RequestTime
+		}
+	}
+	return sheetNameFromTime(latest)
+}
+
+func buildWeidianWorkbook(records []weidianRecord) (*bytes.Buffer, error) {
+	workbook := excelize.NewFile()
+	defer workbook.Close()
+
+	recordsBySheet, sheetOrder := groupWeidianRecordsByMonth(records)
+	defaultSheet := workbook.GetSheetName(workbook.GetActiveSheetIndex())
+	for i, sheetName := range sheetOrder {
+		if i == 0 {
+			if err := workbook.SetSheetName(defaultSheet, sheetName); err != nil {
+				return nil, fmt.Errorf("rename sheet: %w", err)
+			}
+		} else if _, err := workbook.NewSheet(sheetName); err != nil {
+			return nil, fmt.Errorf("create sheet %s: %w", sheetName, err)
+		}
+		if err := writeWeidianSheet(workbook, sheetName, recordsBySheet[sheetName]); err != nil {
+			return nil, err
+		}
+	}
+	if len(sheetOrder) > 0 {
+		index, err := workbook.GetSheetIndex(sheetOrder[0])
+		if err != nil {
+			return nil, fmt.Errorf("get active sheet index: %w", err)
+		}
+		workbook.SetActiveSheet(index)
+	}
+
+	output := &bytes.Buffer{}
+	if err := workbook.Write(output); err != nil {
+		return nil, fmt.Errorf("write workbook: %w", err)
+	}
+	return output, nil
+}
+
+func groupWeidianRecordsByMonth(records []weidianRecord) (map[string][]weidianRecord, []string) {
+	if len(records) == 0 {
+		return map[string][]weidianRecord{"微店": nil}, []string{"微店"}
+	}
+
+	sheetName := records[0].SheetName
+	if sheetName == "" {
+		sheetName = latestWeidianSheetName(records)
+	}
+	return map[string][]weidianRecord{sheetName: records}, []string{sheetName}
+}
+
+func writeWeidianSheet(workbook *excelize.File, sheetName string, records []weidianRecord) error {
+	if err := writeWeidianHeader(workbook, sheetName); err != nil {
+		return err
+	}
+	for rowIndex, record := range records {
+		row := rowIndex + 4
+		values := map[int]any{
+			1:  record.Customer,
+			2:  record.Applicant,
+			3:  record.RequestTime,
+			4:  record.RecipientInfo,
+			22: record.Shipping,
+			23: record.Invoice,
+		}
+		for col, value := range values {
+			if value == "" {
+				continue
+			}
+			if err := setCell(workbook, sheetName, col, row, value); err != nil {
+				return err
+			}
+		}
+		for _, part := range weidianParts {
+			quantity := record.PartCounts[part.Name]
+			if quantity == 0 {
+				continue
+			}
+			if err := setCell(workbook, sheetName, part.Col, row, numberValue(quantity)); err != nil {
+				return err
+			}
+		}
+	}
+	return applyWeidianStyles(workbook, sheetName, len(records))
+}
+
+func writeWeidianHeader(workbook *excelize.File, sheetName string) error {
+	merges := [][2]string{
+		{"A1", "X1"},
+		{"E2", "U2"},
+	}
+	for _, merge := range merges {
+		if err := workbook.MergeCell(sheetName, merge[0], merge[1]); err != nil {
+			return fmt.Errorf("merge %s:%s: %w", merge[0], merge[1], err)
+		}
+	}
+
+	values := map[string]any{
+		"A1": "章管家配件发放表",
+		"A2": "客户名称",
+		"B2": "提出人",
+		"C2": "提出时间",
+		"D2": "收件信息",
+		"E2": "配件名称及数量",
+		"V2": "发货情况",
+		"W2": "是否开票",
+		"X2": "备注",
+	}
+	for _, part := range weidianParts {
+		cell, err := excelize.CoordinatesToCellName(part.Col, 3)
+		if err != nil {
+			return err
+		}
+		values[cell] = part.Name
+	}
+	for cell, value := range values {
+		if err := workbook.SetCellValue(sheetName, cell, value); err != nil {
+			return fmt.Errorf("set %s: %w", cell, err)
+		}
+	}
+	return nil
+}
+
+func applyWeidianStyles(workbook *excelize.File, sheetName string, recordCount int) error {
+	titleStyle, err := workbook.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Size: 16},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+	})
+	if err != nil {
+		return err
+	}
+	headerStyle, err := workbook.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center", WrapText: true},
+		Border:    tableBorders(),
+	})
+	if err != nil {
+		return err
+	}
+	dataStyle, err := workbook.NewStyle(&excelize.Style{
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center", WrapText: true},
+		Border:    tableBorders(),
+	})
+	if err != nil {
+		return err
+	}
+	dateStyle, err := workbook.NewStyle(&excelize.Style{
+		CustomNumFmt: stringPointer("yyyy-mm-dd"),
+		Alignment:    &excelize.Alignment{Horizontal: "center", Vertical: "center", WrapText: true},
+		Border:       tableBorders(),
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := workbook.SetCellStyle(sheetName, "A1", "X1", titleStyle); err != nil {
+		return err
+	}
+	if err := workbook.SetCellStyle(sheetName, "A2", "X3", headerStyle); err != nil {
+		return err
+	}
+	if recordCount > 0 {
+		endCell, err := excelize.CoordinatesToCellName(24, recordCount+3)
+		if err != nil {
+			return err
+		}
+		if err := workbook.SetCellStyle(sheetName, "A4", endCell, dataStyle); err != nil {
+			return err
+		}
+		if err := workbook.SetCellStyle(sheetName, "C4", fmt.Sprintf("C%d", recordCount+3), dateStyle); err != nil {
+			return err
+		}
+	}
+
+	widths := map[string]float64{
+		"A": 10, "B": 12, "C": 14, "D": 48,
+		"E": 10, "F": 12, "G": 10, "H": 14, "I": 12, "J": 14, "K": 14, "L": 12,
+		"M": 12, "N": 10, "O": 10, "P": 10, "Q": 12, "R": 12, "S": 12, "T": 10, "U": 10,
+		"V": 14, "W": 10, "X": 28,
+	}
+	for col, width := range widths {
+		if err := workbook.SetColWidth(sheetName, col, col, width); err != nil {
+			return err
+		}
+	}
+	for row := 1; row <= recordCount+3; row++ {
+		height := 22.0
+		if row == 1 {
+			height = 30
+		}
+		if row == 2 || row == 3 {
+			height = 28
+		}
+		if err := workbook.SetRowHeight(sheetName, row, height); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseProductDetails(details string, productMapping map[string]string) (map[string]float64, []productLogEntry) {
@@ -719,6 +1162,27 @@ func sheetNameFromDate(value string) string {
 	return "出货列表"
 }
 
+func sheetNameFromTime(value time.Time) string {
+	if value.IsZero() {
+		return "微店"
+	}
+	return fmt.Sprintf("%d年%d月", value.Year(), int(value.Month()))
+}
+
+func parseDateOnly(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if len(value) >= len("2006-01-02") {
+		value = value[:len("2006-01-02")]
+	}
+	for _, layout := range []string{"2006-01-02", "2006/01/02", "2006/1/2", "2006-1-2"} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
 func indexHeaders(row []string) headerIndex {
 	headers := make(headerIndex, len(row))
 	for i, value := range row {
@@ -755,6 +1219,63 @@ func joinNonEmpty(values ...string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func buildRecipientInfo(phone string, address string) string {
+	return cleanPhone(phone) + normalizeWhitespace(address)
+}
+
+func normalizeWhitespace(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func invoiceFlag(row sourceRow, headers headerIndex) string {
+	col, ok := headers["开票信息"]
+	if !ok {
+		return ""
+	}
+	if row.get(col) == "" {
+		return ""
+	}
+	return "是"
+}
+
+func splitSemicolon(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == '；'
+	})
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+
+func parseQuantityAt(values []string, index int) float64 {
+	if index < 0 || index >= len(values) {
+		return 0
+	}
+	quantity, err := strconv.ParseFloat(strings.TrimSpace(values[index]), 64)
+	if err != nil {
+		return 0
+	}
+	return quantity
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = normalizeWhitespace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func numberValue(value float64) any {
@@ -804,4 +1325,89 @@ func formatQuantity(value float64) string {
 		return strconv.Itoa(int(value))
 	}
 	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+func buildWeidianLog(records []weidianRecord) string {
+	var builder strings.Builder
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	builder.WriteString("# 微店表转换日志\n\n")
+	builder.WriteString(fmt.Sprintf("- 生成时间：%s\n", now))
+	builder.WriteString("- 转换类型：微店表\n")
+	builder.WriteString("- 过滤规则：订单状态为“已关闭”的行不输出\n")
+	builder.WriteString(fmt.Sprintf("- 输出记录数：%d\n\n", len(records)))
+
+	builder.WriteString("## 商品 ID 映射\n\n")
+	builder.WriteString("| 配件名称 | 商品ID | 输出列 | 处理状态 |\n")
+	builder.WriteString("| --- | --- | --- | --- |\n")
+	for _, part := range weidianParts {
+		status := "已配置"
+		if part.ID == "" {
+			status = "暂未配置ID，保留列"
+		}
+		builder.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", escapeMarkdown(part.Name), part.ID, columnName(part.Col), status))
+	}
+	for id, partName := range weidianPartAliases {
+		part := weidianPartByID[id]
+		builder.WriteString(fmt.Sprintf("| %s | %s | %s | 别名ID |\n", escapeMarkdown(partName), id, columnName(part.Col)))
+	}
+
+	builder.WriteString("\n## 逐行转换明细\n\n")
+	for _, record := range records {
+		builder.WriteString(fmt.Sprintf("### 原文件第 %d 行 / 订单编号 %s\n\n", record.SourceRow, escapeMarkdown(record.OrderNo)))
+		builder.WriteString(fmt.Sprintf("- 订单状态：%s\n", escapeMarkdown(record.OrderStatus)))
+		builder.WriteString(fmt.Sprintf("- 输出 Sheet：%s\n", escapeMarkdown(record.SheetName)))
+		builder.WriteString(fmt.Sprintf("- 输出行号：%d\n\n", record.OutputRow))
+
+		builder.WriteString("| 输出字段 | 来源字段 | 写入值 |\n")
+		builder.WriteString("| --- | --- | --- |\n")
+		builder.WriteString(fmt.Sprintf("| 客户名称 | 固定规则 | %s |\n", escapeMarkdown(record.Customer)))
+		builder.WriteString(fmt.Sprintf("| 提出人 | 收货人/提货人姓名 | %s |\n", escapeMarkdown(record.Applicant)))
+		builder.WriteString(fmt.Sprintf("| 提出时间 | 下单时间 | %s |\n", escapeMarkdown(record.RequestTime.Format("2006-01-02"))))
+		builder.WriteString(fmt.Sprintf("| 收件信息 | 收货人/提货人手机号 + 收货/提货详细地址 | %s |\n", escapeMarkdown(record.RecipientInfo)))
+		builder.WriteString(fmt.Sprintf("| 发货情况 | 当前规则 | %s |\n", escapeMarkdown(record.Shipping)))
+		builder.WriteString(fmt.Sprintf("| 是否开票 | 开票信息 | %s |\n", escapeMarkdown(record.Invoice)))
+		builder.WriteString(fmt.Sprintf("| 备注 | 未映射商品 + 买家留言 + 卖家备注 | %s |\n\n", escapeMarkdown(strings.Join(record.Notes, "；"))))
+
+		if len(record.PartEntries) == 0 {
+			builder.WriteString("未解析到任何商品 ID。\n\n")
+			continue
+		}
+
+		builder.WriteString("| 商品ID | 商品名称 | 数量 | 映射配件 | 输出单元格 | 处理结果 | 说明 |\n")
+		builder.WriteString("| --- | --- | ---: | --- | --- | --- | --- |\n")
+		for _, part := range record.PartEntries {
+			builder.WriteString(fmt.Sprintf(
+				"| %s | %s | %s | %s | %s | %s | %s |\n",
+				escapeMarkdown(part.ProductID),
+				escapeMarkdown(part.ProductName),
+				formatQuantity(part.Quantity),
+				escapeMarkdown(part.PartName),
+				part.OutputCell,
+				part.Status,
+				escapeMarkdown(part.Description),
+			))
+		}
+
+		if len(record.PartCounts) > 0 {
+			builder.WriteString("\n汇总写入：\n\n")
+			builder.WriteString("| 输出单元格 | 配件名称 | 数量 |\n")
+			builder.WriteString("| --- | --- | ---: |\n")
+			for _, part := range weidianParts {
+				quantity := record.PartCounts[part.Name]
+				if quantity == 0 {
+					continue
+				}
+				cell := fmt.Sprintf("%s%d", columnName(part.Col), record.OutputRow)
+				builder.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cell, escapeMarkdown(part.Name), formatQuantity(quantity)))
+			}
+		}
+		builder.WriteString("\n")
+	}
+
+	return builder.String()
 }

@@ -63,20 +63,14 @@ async function transformFile() {
       <el-form label-position="top">
         <el-form-item label="表格类型">
           <el-radio-group v-model="sourceType">
-            <el-radio-button label="outbound">出库表</el-radio-button>
-            <el-radio-button label="weidian">微店表</el-radio-button>
+            <el-radio-button value="outbound">出库表</el-radio-button>
+            <el-radio-button value="weidian">微店表</el-radio-button>
           </el-radio-group>
         </el-form-item>
 
         <el-form-item label="Excel 文件">
-          <el-upload
-            drag
-            accept=".xlsx,.xls"
-            :auto-upload="false"
-            :limit="1"
-            :on-change="handleFileChange"
-            :on-remove="handleFileRemove"
-          >
+          <el-upload drag accept=".xlsx,.xls" :auto-upload="false" :limit="1" :on-change="handleFileChange"
+            :on-remove="handleFileRemove">
             <div class="upload-text">
               <strong>拖拽文件到这里</strong>
               <span>或点击选择 Excel 文件</span>

@@ -3,6 +3,7 @@ package excel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -74,6 +75,72 @@ func TestTransformOutboundXLS(t *testing.T) {
 	assertCell(t, workbook, sheet, cellName(t, 13, row), "3")
 }
 
+func TestTransformWeidianXLSX(t *testing.T) {
+	input, err := os.Open(filepath.Join("..", "..", "示例文件", "原文件", "原文件_微店.xlsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+
+	output, err := Transform(input, SourceTypeWeidian, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.LogMarkdown, "订单状态为“已关闭”的行不输出") {
+		t.Fatal("expected weidian markdown log")
+	}
+	if strings.Contains(output.LogMarkdown, "844217256880654") {
+		t.Fatal("closed order should not appear in log")
+	}
+
+	workbook, err := excelize.OpenReader(output.Workbook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workbook.Close()
+
+	const sheet = "2026年4月"
+	if index, err := workbook.GetSheetIndex(sheet); err != nil || index == -1 {
+		t.Fatalf("expected sheet %q, index=%d, err=%v", sheet, index, err)
+	}
+
+	assertCell(t, workbook, sheet, "A2", "客户名称")
+	assertCell(t, workbook, sheet, "E2", "配件名称及数量")
+	assertCell(t, workbook, sheet, "O3", "3M胶")
+	assertCell(t, workbook, sheet, "P3", "环形胶")
+
+	row := findRowByApplicant(t, workbook, sheet, "钟小姐")
+	assertCell(t, workbook, sheet, cellName(t, 1, row), "微店")
+	assertCell(t, workbook, sheet, cellName(t, 4, row), "13620564479广东省 深圳市 南山区 沙河街道 侨香路智慧广场A1座1201")
+	assertCell(t, workbook, sheet, cellName(t, 15, row), "10")
+	assertCell(t, workbook, sheet, cellName(t, 16, row), "20")
+	assertCell(t, workbook, sheet, cellName(t, 23, row), "")
+
+	row = findRowByApplicant(t, workbook, sheet, "谢女士")
+	assertCell(t, workbook, sheet, cellName(t, 23, row), "是")
+
+	row = findRowByApplicant(t, workbook, sheet, "王雅茜")
+	assertCell(t, workbook, sheet, cellName(t, 7, row), "2")
+
+	row = findRowByApplicant(t, workbook, sheet, "杜晓永")
+	assertCell(t, workbook, sheet, cellName(t, 5, row), "2")
+
+	row = findRowByApplicant(t, workbook, sheet, "木木")
+	assertCell(t, workbook, sheet, cellName(t, 5, row), "10")
+	assertCell(t, workbook, sheet, cellName(t, 6, row), "10")
+
+	row = findRowByApplicant(t, workbook, sheet, "朱洪")
+	assertCell(t, workbook, sheet, cellName(t, 6, row), "1")
+	assertCell(t, workbook, sheet, cellName(t, 15, row), "1")
+
+	row = findRowByApplicant(t, workbook, sheet, "薛坤")
+	assertCell(t, workbook, sheet, cellName(t, 17, row), "1")
+	assertCell(t, workbook, sheet, cellName(t, 24, row), "")
+	if !strings.Contains(output.LogMarkdown, "光敏章配件一套") {
+		t.Fatal("expected unmapped product in markdown log")
+	}
+}
+
 func findRowByDocumentNo(t *testing.T, workbook *excelize.File, sheet string, documentNo string) int {
 	t.Helper()
 
@@ -87,6 +154,22 @@ func findRowByDocumentNo(t *testing.T, workbook *excelize.File, sheet string, do
 		}
 	}
 	t.Fatalf("document %s not found", documentNo)
+	return 0
+}
+
+func findRowByApplicant(t *testing.T, workbook *excelize.File, sheet string, applicant string) int {
+	t.Helper()
+
+	rows, err := workbook.GetRows(sheet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rowIndex, row := range rows {
+		if len(row) >= 2 && row[1] == applicant {
+			return rowIndex + 1
+		}
+	}
+	t.Fatalf("applicant %s not found", applicant)
 	return 0
 }
 
