@@ -110,20 +110,27 @@ var weidianParts = []partDefinition{
 	{Name: "墨盒", ID: "4722165469", Col: 5},
 	{Name: "墨盒海绵", ID: "7316226980", Col: 6},
 	{Name: "章环", ID: "4466273920", Col: 7},
-	{Name: "智能印章垫", ID: "", Col: 8},
+	{Name: "定位卡片", ID: "4478885116", Col: 8},
 	{Name: "工作台垫", ID: "4295433136", Col: 9},
 	{Name: "手动版墨盒", ID: "6110548102", Col: 10},
 	{Name: "智能章底盖", ID: "4294793637", Col: 11},
-	{Name: "光敏底座", ID: "46677368385", Col: 12},
+	{Name: "光敏底座", ID: "4294778913", Col: 12},
 	{Name: "铜章底座", ID: "", Col: 13},
 	{Name: "垫片", ID: "4295441048", Col: 14},
 	{Name: "3M胶", ID: "4295371280", Col: 15},
 	{Name: "环形胶", ID: "4339144891", Col: 16},
 	{Name: "定制章环", ID: "6121614436", Col: 17},
-	{Name: "铜章印油", ID: "4294795757", Col: 18},
-	{Name: "光敏印油", ID: "4402625197", Col: 19},
-	{Name: "木工胶", ID: "4294767099", Col: 20},
-	{Name: "印章包", ID: "", Col: 21},
+	{Name: "定制光敏底座", ID: "6239519854", Col: 18},
+	{Name: "铜章印油", ID: "4294795757", Col: 19},
+	{Name: "光敏印油", ID: "4402625197", Col: 20},
+	{Name: "木工胶", ID: "4294767099", Col: 21},
+	{Name: "印章包", ID: "4458446275", Col: 22},
+	{Name: "工作台电源", ID: "4517103559", Col: 23},
+	{Name: "印章电源", ID: "4425522452", Col: 24},
+	{Name: "光敏配件一套", ID: "4466313670", Col: 25},
+	{Name: "铜章配件一套", ID: "4465501827", Col: 26},
+	{Name: "光敏章快拆配件", ID: "7244521801", Col: 27},
+	{Name: "铜章快拆配件", ID: "7245501786", Col: 28},
 }
 
 var weidianPartAliases = map[string]string{
@@ -469,14 +476,6 @@ func parseWeidianWorkbook(input []byte) ([]weidianRecord, error) {
 		)
 		notes := make([]string, 0)
 		notes = append(notes, unmappedNames...)
-		for _, name := range []string{"买家留言", "卖家备注"} {
-			if col, ok := headers[name]; ok {
-				if value := row.get(col); value != "" {
-					notes = append(notes, value)
-				}
-			}
-		}
-
 		record := weidianRecord{
 			Customer:      "微店",
 			Applicant:     row.get(headers["收货人/提货人姓名"]),
@@ -521,9 +520,7 @@ func parseWeidianParts(productIDs string, quantities string, productNames string
 		if !ok {
 			entry.Status = "未映射"
 			entry.Description = "商品ID未配置到配件列，已放入备注供后续补充"
-			if productName != "" {
-				unmappedNames = append(unmappedNames, productName)
-			}
+			unmappedNames = append(unmappedNames, formatUnmappedWeidianNote(productName, id, quantity))
 			entries = append(entries, entry)
 			continue
 		}
@@ -537,6 +534,17 @@ func parseWeidianParts(productIDs string, quantities string, productNames string
 	}
 
 	return counts, entries, unmappedNames
+}
+
+func formatUnmappedWeidianNote(productName string, productID string, quantity float64) string {
+	name := strings.TrimSpace(productName)
+	if name == "" {
+		name = strings.TrimSpace(productID)
+	}
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s *%v", name, numberValue(quantity))
 }
 
 func buildWeidianPartByID() map[string]partDefinition {
@@ -658,8 +666,9 @@ func writeWeidianSheet(workbook *excelize.File, sheetName string, records []weid
 			2:  record.Applicant,
 			3:  record.RequestTime,
 			4:  record.RecipientInfo,
-			22: record.Shipping,
-			23: record.Invoice,
+			29: record.Shipping,
+			30: record.Invoice,
+			31: strings.Join(record.Notes, "；"),
 		}
 		for col, value := range values {
 			if value == "" {
@@ -684,8 +693,8 @@ func writeWeidianSheet(workbook *excelize.File, sheetName string, records []weid
 
 func writeWeidianHeader(workbook *excelize.File, sheetName string) error {
 	merges := [][2]string{
-		{"A1", "X1"},
-		{"E2", "U2"},
+		{"A1", "AE1"},
+		{"E2", "AB2"},
 	}
 	for _, merge := range merges {
 		if err := workbook.MergeCell(sheetName, merge[0], merge[1]); err != nil {
@@ -694,15 +703,15 @@ func writeWeidianHeader(workbook *excelize.File, sheetName string) error {
 	}
 
 	values := map[string]any{
-		"A1": "章管家配件发放表",
-		"A2": "客户名称",
-		"B2": "提出人",
-		"C2": "提出时间",
-		"D2": "收件信息",
-		"E2": "配件名称及数量",
-		"V2": "发货情况",
-		"W2": "是否开票",
-		"X2": "备注",
+		"A1":  "章管家配件发放表",
+		"A2":  "客户名称",
+		"B2":  "提出人",
+		"C2":  "提出时间",
+		"D2":  "收件信息",
+		"E2":  "配件名称及数量",
+		"AC2": "发货情况",
+		"AD2": "是否开票",
+		"AE2": "备注",
 	}
 	for _, part := range weidianParts {
 		cell, err := excelize.CoordinatesToCellName(part.Col, 3)
@@ -751,14 +760,14 @@ func applyWeidianStyles(workbook *excelize.File, sheetName string, recordCount i
 		return err
 	}
 
-	if err := workbook.SetCellStyle(sheetName, "A1", "X1", titleStyle); err != nil {
+	if err := workbook.SetCellStyle(sheetName, "A1", "AE1", titleStyle); err != nil {
 		return err
 	}
-	if err := workbook.SetCellStyle(sheetName, "A2", "X3", headerStyle); err != nil {
+	if err := workbook.SetCellStyle(sheetName, "A2", "AE3", headerStyle); err != nil {
 		return err
 	}
 	if recordCount > 0 {
-		endCell, err := excelize.CoordinatesToCellName(24, recordCount+3)
+		endCell, err := excelize.CoordinatesToCellName(31, recordCount+3)
 		if err != nil {
 			return err
 		}
@@ -774,7 +783,7 @@ func applyWeidianStyles(workbook *excelize.File, sheetName string, recordCount i
 		"A": 10, "B": 12, "C": 14, "D": 48,
 		"E": 10, "F": 12, "G": 10, "H": 14, "I": 12, "J": 14, "K": 14, "L": 12,
 		"M": 12, "N": 10, "O": 10, "P": 10, "Q": 12, "R": 12, "S": 12, "T": 10, "U": 10,
-		"V": 14, "W": 10, "X": 28,
+		"V": 10, "W": 14, "X": 14, "Y": 16, "Z": 16, "AA": 18, "AB": 18, "AC": 14, "AD": 10, "AE": 28,
 	}
 	for col, width := range widths {
 		if err := workbook.SetColWidth(sheetName, col, col, width); err != nil {
@@ -1371,7 +1380,7 @@ func buildWeidianLog(records []weidianRecord) string {
 		builder.WriteString(fmt.Sprintf("| 收件信息 | 收货人/提货人手机号 + 收货/提货详细地址 | %s |\n", escapeMarkdown(record.RecipientInfo)))
 		builder.WriteString(fmt.Sprintf("| 发货情况 | 当前规则 | %s |\n", escapeMarkdown(record.Shipping)))
 		builder.WriteString(fmt.Sprintf("| 是否开票 | 开票信息 | %s |\n", escapeMarkdown(record.Invoice)))
-		builder.WriteString(fmt.Sprintf("| 备注 | 未映射商品 + 买家留言 + 卖家备注 | %s |\n\n", escapeMarkdown(strings.Join(record.Notes, "；"))))
+		builder.WriteString(fmt.Sprintf("| 备注 | 未配置到输出列的商品 | %s |\n\n", escapeMarkdown(strings.Join(record.Notes, "；"))))
 
 		if len(record.PartEntries) == 0 {
 			builder.WriteString("未解析到任何商品 ID。\n\n")
