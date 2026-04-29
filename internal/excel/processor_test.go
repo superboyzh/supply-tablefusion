@@ -86,7 +86,7 @@ func TestTransformWeidianXLSX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.LogMarkdown, "订单状态为“已关闭”的行不输出") {
+	if !strings.Contains(output.LogMarkdown, "订单状态为“已关闭”或“待付款”的行不输出") {
 		t.Fatal("expected weidian markdown log")
 	}
 	if strings.Contains(output.LogMarkdown, "844217256880654") {
@@ -173,6 +173,19 @@ func TestParseWeidianPartsCustomPhotosensitiveBase(t *testing.T) {
 	}
 	if counts["定制光敏底座"] != 2 {
 		t.Fatalf("expected 定制光敏底座 count 2, got %v", counts["定制光敏底座"])
+	}
+}
+
+func TestShouldSkipWeidianOrderStatus(t *testing.T) {
+	for _, status := range []string{"已关闭", "待付款", " 待付款 "} {
+		if !shouldSkipWeidianOrderStatus(status) {
+			t.Fatalf("expected status %q to be skipped", status)
+		}
+	}
+	for _, status := range []string{"待发货", "已发货", ""} {
+		if shouldSkipWeidianOrderStatus(status) {
+			t.Fatalf("expected status %q to be kept", status)
+		}
 	}
 }
 

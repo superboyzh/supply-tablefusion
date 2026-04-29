@@ -465,7 +465,7 @@ func parseWeidianWorkbook(input []byte) ([]weidianRecord, error) {
 			continue
 		}
 		orderStatus := row.get(headers["订单状态"])
-		if orderStatus == "已关闭" {
+		if shouldSkipWeidianOrderStatus(orderStatus) {
 			continue
 		}
 
@@ -493,6 +493,15 @@ func parseWeidianWorkbook(input []byte) ([]weidianRecord, error) {
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+func shouldSkipWeidianOrderStatus(orderStatus string) bool {
+	switch strings.TrimSpace(orderStatus) {
+	case "已关闭", "待付款":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseWeidianParts(productIDs string, quantities string, productNames string) (map[string]float64, []partLogEntry, []string) {
@@ -1347,7 +1356,7 @@ func buildWeidianLog(records []weidianRecord) string {
 	builder.WriteString("# 微店表转换日志\n\n")
 	builder.WriteString(fmt.Sprintf("- 生成时间：%s\n", now))
 	builder.WriteString("- 转换类型：微店表\n")
-	builder.WriteString("- 过滤规则：订单状态为“已关闭”的行不输出\n")
+	builder.WriteString("- 过滤规则：订单状态为“已关闭”或“待付款”的行不输出\n")
 	builder.WriteString(fmt.Sprintf("- 输出记录数：%d\n\n", len(records)))
 
 	builder.WriteString("## 商品 ID 映射\n\n")
